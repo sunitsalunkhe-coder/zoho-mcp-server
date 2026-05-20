@@ -7,6 +7,15 @@ export function createOAuthApp(): express.Application {
   const app = express();
   app.use(express.json());
 
+  // CORS — required for claude.ai web to reach this server
+  app.use((_req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization, mcp-session-id");
+    if (_req.method === "OPTIONS") { res.sendStatus(200); return; }
+    next();
+  });
+
   // Visit this URL in browser to trigger Zoho OAuth login for a specific user
   app.get("/auth/login", (req, res) => {
     const uid = req.query["uid"];
