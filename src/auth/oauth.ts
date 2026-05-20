@@ -17,6 +17,7 @@ export function getAuthUrl(): string {
       "ZohoMail.messages.ALL,ZohoMail.accounts.READ,ZohoMail.folders.ALL,ZohoMail.attachments.ALL",
     redirect_uri: process.env["ZOHO_REDIRECT_URI"] ?? "",
     access_type: "offline",
+    prompt: "consent",
   });
   return `${authBase()}/oauth/v2/auth?${params.toString()}`;
 }
