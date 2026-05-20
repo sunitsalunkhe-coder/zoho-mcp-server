@@ -2,7 +2,7 @@ import "dotenv/config";
 import crypto from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -92,37 +92,65 @@ async function main(): Promise<void> {
     await server.connect(t);
     logger.info("MCP server ready (stdio)");
   } else {
-    logger.info({ port }, "Starting MCP server (HTTP/SSE transport)");
+    logger.info({ port }, "Starting MCP server (Streamable HTTP transport)");
     const app = createOAuthApp();
-    const sessions = new Map<string, SSEServerTransport>();
 
-    app.get("/sse", async (req, res) => {
+    // session → { server, transport }
+    const sessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport }>();
+
+    app.post("/mcp", async (req, res) => {
       const userId = (req.query["uid"] as string) || "default";
-      const sessionId = crypto.randomUUID();
-      logger.info({ userId, sessionId }, "SSE client connected");
-      const server = await createMcpServer(userId);
-      const sseTransport = new SSEServerTransport(`/messages/${sessionId}`, res);
-      sessions.set(sessionId, sseTransport);
-      sseTransport.onclose = () => {
-        sessions.delete(sessionId);
-        logger.info({ userId, sessionId }, "SSE client disconnected");
-      };
-      await server.connect(sseTransport);
-    });
+      const existingSessionId = req.headers["mcp-session-id"] as string | undefined;
 
-    app.post("/messages/:sessionId", async (req, res) => {
-      const { sessionId } = req.params;
-      const sseTransport = sessions.get(sessionId);
-      if (!sseTransport) {
-        res.status(503).json({ error: "No SSE connection for session" });
+      if (existingSessionId && sessions.has(existingSessionId)) {
+        const { transport } = sessions.get(existingSessionId)!;
+        await transport.handleRequest(req, res, req.body);
         return;
       }
-      await sseTransport.handlePostMessage(req, res);
+
+      // New session
+      const server = await createMcpServer(userId);
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+      });
+
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+
+      if (transport.sessionId) {
+        sessions.set(transport.sessionId, { server, transport });
+        transport.onclose = () => {
+          if (transport.sessionId) sessions.delete(transport.sessionId);
+          logger.info({ userId, sessionId: transport.sessionId }, "session closed");
+        };
+        logger.info({ userId, sessionId: transport.sessionId }, "session created");
+      }
+    });
+
+    app.get("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (!sessionId || !sessions.has(sessionId)) {
+        res.status(400).json({ error: "Invalid or missing session ID" });
+        return;
+      }
+      const { transport } = sessions.get(sessionId)!;
+      await transport.handleRequest(req, res);
+    });
+
+    app.delete("/mcp", async (req, res) => {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      if (sessionId && sessions.has(sessionId)) {
+        const { server, transport } = sessions.get(sessionId)!;
+        await transport.close();
+        await server.close();
+        sessions.delete(sessionId);
+      }
+      res.status(200).json({ ok: true });
     });
 
     app.listen(port, () => {
       logger.info({ port }, "HTTP server listening");
-      logger.info(`SSE endpoint: http://localhost:${port}/sse?uid=email@domain.com`);
+      logger.info(`MCP endpoint: http://localhost:${port}/mcp?uid=email@domain.com`);
       logger.info(`Auth: http://localhost:${port}/auth/login?uid=email@domain.com`);
       logger.info(`Health: http://localhost:${port}/health`);
     });
