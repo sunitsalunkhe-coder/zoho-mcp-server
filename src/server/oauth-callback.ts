@@ -1,11 +1,17 @@
 import express from "express";
-import { exchangeCode } from "../auth/oauth.js";
+import { exchangeCode, getAuthUrl } from "../auth/oauth.js";
 import { loadTokens } from "../auth/token-store.js";
 import { logger } from "../utils/logger.js";
 
 export function createOAuthApp(): express.Application {
   const app = express();
   app.use(express.json());
+
+  // Visit this URL in browser to trigger Zoho OAuth login
+  app.get("/auth/login", (_req, res) => {
+    const url = getAuthUrl();
+    res.redirect(url);
+  });
 
   app.get("/oauth/callback", (req, res) => {
     const code = req.query["code"];
