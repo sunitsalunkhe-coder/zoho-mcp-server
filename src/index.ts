@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
@@ -9,6 +10,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { logger } from "./utils/logger.js";
 import { toUserMessage } from "./utils/errors.js";
+import { userContext } from "./utils/context.js";
 import { createOAuthApp } from "./server/oauth-callback.js";
 
 import * as sendTool from "./tools/send.js";
@@ -41,7 +43,7 @@ const TOOLS: { definition: Tool; handler: (args: unknown) => Promise<string> }[]
 
 const toolMap = new Map(TOOLS.map((t) => [t.definition.name, t.handler]));
 
-async function createServer(): Promise<Server> {
+async function createMcpServer(userId: string): Promise<Server> {
   const server = new Server(
     { name: "zoho-mail-mcp", version: "1.0.0" },
     { capabilities: { tools: {} } },
@@ -52,26 +54,28 @@ async function createServer(): Promise<Server> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    const handler = toolMap.get(name);
-    if (!handler) {
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: `Unknown tool: ${name}` }) }],
-        isError: true,
-      };
-    }
-    logger.info({ tool: name }, "tool_dispatch");
-    try {
-      const result = await handler(args ?? {});
-      return { content: [{ type: "text" as const, text: result }] };
-    } catch (e) {
-      const msg = toUserMessage(e);
-      logger.error({ tool: name, err: e }, "tool_error");
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
-        isError: true,
-      };
-    }
+    return userContext.run(userId, async () => {
+      const { name, arguments: args } = request.params;
+      const handler = toolMap.get(name);
+      if (!handler) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: `Unknown tool: ${name}` }) }],
+          isError: true,
+        };
+      }
+      logger.info({ tool: name, userId }, "tool_dispatch");
+      try {
+        const result = await handler(args ?? {});
+        return { content: [{ type: "text" as const, text: result }] };
+      } catch (e) {
+        const msg = toUserMessage(e);
+        logger.error({ tool: name, userId, err: e }, "tool_error");
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: msg }) }],
+          isError: true,
+        };
+      }
+    });
   });
 
   return server;
@@ -81,27 +85,36 @@ async function main(): Promise<void> {
   const transport = process.env["MCP_TRANSPORT"] ?? "stdio";
   const port = parseInt(process.env["PORT"] ?? "3000");
 
-  const server = await createServer();
-
   if (transport === "stdio") {
     logger.info("Starting MCP server (stdio transport)");
+    const server = await createMcpServer("default");
     const t = new StdioServerTransport();
     await server.connect(t);
     logger.info("MCP server ready (stdio)");
   } else {
     logger.info({ port }, "Starting MCP server (HTTP/SSE transport)");
     const app = createOAuthApp();
-    let sseTransport: SSEServerTransport | null = null;
+    const sessions = new Map<string, SSEServerTransport>();
 
     app.get("/sse", async (req, res) => {
-      logger.info("SSE client connected");
-      sseTransport = new SSEServerTransport("/messages", res);
+      const userId = (req.query["uid"] as string) || "default";
+      const sessionId = crypto.randomUUID();
+      logger.info({ userId, sessionId }, "SSE client connected");
+      const server = await createMcpServer(userId);
+      const sseTransport = new SSEServerTransport(`/messages/${sessionId}`, res);
+      sessions.set(sessionId, sseTransport);
+      sseTransport.onclose = () => {
+        sessions.delete(sessionId);
+        logger.info({ userId, sessionId }, "SSE client disconnected");
+      };
       await server.connect(sseTransport);
     });
 
-    app.post("/messages", async (req, res) => {
+    app.post("/messages/:sessionId", async (req, res) => {
+      const { sessionId } = req.params;
+      const sseTransport = sessions.get(sessionId);
       if (!sseTransport) {
-        res.status(503).json({ error: "No SSE connection" });
+        res.status(503).json({ error: "No SSE connection for session" });
         return;
       }
       await sseTransport.handlePostMessage(req, res);
@@ -109,7 +122,8 @@ async function main(): Promise<void> {
 
     app.listen(port, () => {
       logger.info({ port }, "HTTP server listening");
-      logger.info(`SSE endpoint: http://localhost:${port}/sse`);
+      logger.info(`SSE endpoint: http://localhost:${port}/sse?uid=email@domain.com`);
+      logger.info(`Auth: http://localhost:${port}/auth/login?uid=email@domain.com`);
       logger.info(`Health: http://localhost:${port}/health`);
     });
   }

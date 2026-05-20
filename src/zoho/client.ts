@@ -2,18 +2,21 @@ import axios, { type AxiosInstance, type AxiosError } from "axios";
 import axiosRetry from "axios-retry";
 import { loadTokens, saveTokens, isTokenExpired } from "../auth/token-store.js";
 import { refreshAccessToken } from "../auth/oauth.js";
+import { getUserId } from "../utils/context.js";
 import { logger } from "../utils/logger.js";
 import { ZohoAuthError, ZohoRateLimitError } from "../utils/errors.js";
 import type { ZohoAccount, ZohoApiResponse } from "./types.js";
 
 export const MAIL_BASE = `https://mail.zoho.${process.env["ZOHO_DC"] ?? "in"}/api`;
 
-let accountIdCache: string | null = null;
-let fromEmailCache: string | null = null;
-let clientInstance: AxiosInstance | null = null;
+const accountIdCache = new Map<string, string>();
+const fromEmailCache = new Map<string, string>();
+const clientInstances = new Map<string, AxiosInstance>();
 
 export function getZohoClient(): AxiosInstance {
-  if (clientInstance) return clientInstance;
+  const userId = getUserId();
+  const existing = clientInstances.get(userId);
+  if (existing) return existing;
 
   const client = axios.create({ baseURL: MAIL_BASE, timeout: 30_000 });
 
@@ -26,11 +29,11 @@ export function getZohoClient(): AxiosInstance {
   });
 
   client.interceptors.request.use(async (config) => {
-    let tokens = loadTokens();
-    if (!tokens) throw new ZohoAuthError("Not authenticated. Run: npm run auth");
+    let tokens = loadTokens(userId);
+    if (!tokens) throw new ZohoAuthError(`Not authenticated for user ${userId}. Visit /auth/login?uid=${userId}`);
     if (isTokenExpired(tokens)) {
-      await refreshAccessToken();
-      tokens = loadTokens()!;
+      await refreshAccessToken(userId);
+      tokens = loadTokens(userId)!;
     }
     config.headers["Authorization"] = `Zoho-oauthtoken ${tokens.accessToken}`;
     return config;
@@ -42,7 +45,7 @@ export function getZohoClient(): AxiosInstance {
       if (err.response?.status === 429) throw new ZohoRateLimitError();
       if (err.response?.status === 401 && err.config && !(err.config as unknown as Record<string, unknown>)["_retry"]) {
         (err.config as unknown as Record<string, unknown>)["_retry"] = true;
-        const token = await refreshAccessToken();
+        const token = await refreshAccessToken(userId);
         err.config.headers["Authorization"] = `Zoho-oauthtoken ${token}`;
         return client.request(err.config);
       }
@@ -50,17 +53,19 @@ export function getZohoClient(): AxiosInstance {
     },
   );
 
-  clientInstance = client;
+  clientInstances.set(userId, client);
   return client;
 }
 
 export async function getAccountId(): Promise<string> {
-  if (accountIdCache) return accountIdCache;
+  const userId = getUserId();
+  const cached = accountIdCache.get(userId);
+  if (cached) return cached;
 
-  const stored = loadTokens();
+  const stored = loadTokens(userId);
   if (stored?.accountId) {
-    accountIdCache = stored.accountId;
-    return accountIdCache;
+    accountIdCache.set(userId, stored.accountId);
+    return stored.accountId;
   }
 
   const client = getZohoClient();
@@ -70,21 +75,23 @@ export async function getAccountId(): Promise<string> {
     throw new ZohoAuthError("No Zoho accounts found for this OAuth token.");
   }
   const acc = accounts[0]!;
-  accountIdCache = acc.accountId;
+  accountIdCache.set(userId, acc.accountId);
   // Cache primary email
   if (Array.isArray(acc.emailAddress)) {
     const primary = acc.emailAddress.find((e) => e.isPrimary);
-    fromEmailCache = primary?.mailId ?? acc.incomingUserName ?? "";
+    fromEmailCache.set(userId, primary?.mailId ?? acc.incomingUserName ?? "");
   } else {
-    fromEmailCache = acc.incomingUserName ?? "";
+    fromEmailCache.set(userId, acc.incomingUserName ?? "");
   }
-  const tokens = loadTokens()!;
-  saveTokens({ ...tokens, accountId: accountIdCache });
-  return accountIdCache;
+  const tokens = loadTokens(userId)!;
+  saveTokens(userId, { ...tokens, accountId: acc.accountId });
+  return acc.accountId;
 }
 
 export async function getFromEmail(): Promise<string> {
-  if (fromEmailCache) return fromEmailCache;
+  const userId = getUserId();
+  const cached = fromEmailCache.get(userId);
+  if (cached) return cached;
   // getAccountId() may return early from token cache without hitting API
   // so fetch accounts directly to get primary email
   const client = getZohoClient();
@@ -98,8 +105,9 @@ export async function getFromEmail(): Promise<string> {
     const primary = Array.isArray(acc.emailAddress)
       ? acc.emailAddress.find((e) => e.isPrimary)?.mailId
       : undefined;
-    fromEmailCache = primary ?? acc.incomingUserName ?? "";
-    if (!accountIdCache) accountIdCache = acc.accountId;
+    const email = primary ?? acc.incomingUserName ?? "";
+    fromEmailCache.set(userId, email);
+    if (!accountIdCache.has(userId)) accountIdCache.set(userId, acc.accountId);
   }
-  return fromEmailCache ?? "";
+  return fromEmailCache.get(userId) ?? "";
 }

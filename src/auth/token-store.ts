@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import { dirname, extname, basename, join } from "path";
 import { encrypt, decrypt } from "../utils/encryption.js";
+import { getUserId } from "../utils/context.js";
 
 export interface TokenData {
   accessToken: string;
@@ -15,28 +16,35 @@ interface TokenCache {
   ts: number;
 }
 
-let cache: TokenCache | null = null;
+const cacheMap = new Map<string, TokenCache>();
 const CACHE_TTL = 5_000;
 
-function storePath(): string {
-  return process.env["TOKEN_STORE_PATH"] ?? "./data/tokens.enc";
+function storePath(userId: string): string {
+  const base = process.env["TOKEN_STORE_PATH"] ?? "./data/tokens.enc";
+  if (userId === "default") return base;
+  const dir = dirname(base);
+  const ext = extname(base);
+  const name = basename(base, ext);
+  const safe = userId.replace(/[^a-zA-Z0-9]/g, "_");
+  return join(dir, `${name}-${safe}${ext}`);
 }
 
-export function saveTokens(data: TokenData): void {
-  const p = storePath();
+export function saveTokens(userId: string, data: TokenData): void {
+  const p = storePath(userId);
   mkdirSync(dirname(p), { recursive: true });
   const withTs = { ...data, lastRefresh: new Date().toISOString() };
   writeFileSync(p, encrypt(JSON.stringify(withTs)), "utf8");
-  cache = { data: withTs, ts: Date.now() };
+  cacheMap.set(userId, { data: withTs, ts: Date.now() });
 }
 
-export function loadTokens(): TokenData | null {
-  if (cache && Date.now() - cache.ts < CACHE_TTL) return cache.data;
-  const p = storePath();
+export function loadTokens(userId: string = getUserId()): TokenData | null {
+  const cached = cacheMap.get(userId);
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.data;
+  const p = storePath(userId);
   if (!existsSync(p)) return null;
   try {
     const data = JSON.parse(decrypt(readFileSync(p, "utf8"))) as TokenData;
-    cache = { data, ts: Date.now() };
+    cacheMap.set(userId, { data, ts: Date.now() });
     return data;
   } catch {
     return null;
@@ -45,4 +53,12 @@ export function loadTokens(): TokenData | null {
 
 export function isTokenExpired(tokens: TokenData): boolean {
   return Date.now() >= tokens.expiresAt - 60_000;
+}
+
+export function listAuthenticatedUsers(): string[] {
+  const users: string[] = [];
+  for (const [userId, entry] of cacheMap.entries()) {
+    if (Date.now() < entry.data.expiresAt) users.push(userId);
+  }
+  return users;
 }

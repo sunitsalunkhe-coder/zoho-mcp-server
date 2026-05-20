@@ -8,7 +8,7 @@ function authBase(): string {
   return `https://accounts.zoho.${process.env["ZOHO_DC"] ?? "in"}`;
 }
 
-export function getAuthUrl(): string {
+export function getAuthUrl(userId: string): string {
   const params = new URLSearchParams({
     response_type: "code",
     client_id: process.env["ZOHO_CLIENT_ID"] ?? "",
@@ -18,11 +18,12 @@ export function getAuthUrl(): string {
     redirect_uri: process.env["ZOHO_REDIRECT_URI"] ?? "",
     access_type: "offline",
     prompt: "consent",
+    state: userId,
   });
   return `${authBase()}/oauth/v2/auth?${params.toString()}`;
 }
 
-export async function exchangeCode(code: string): Promise<void> {
+export async function exchangeCode(code: string, userId: string): Promise<void> {
   const res = await axios.post<{
     access_token: string;
     refresh_token: string;
@@ -39,17 +40,17 @@ export async function exchangeCode(code: string): Promise<void> {
   const { access_token, refresh_token, expires_in } = res.data;
   if (!refresh_token) throw new ZohoAuthError("No refresh_token returned — ensure access_type=offline");
   const expiresAt = Date.now() + ((expires_in && expires_in > 0) ? expires_in : 3600) * 1000;
-  saveTokens({
+  saveTokens(userId, {
     accessToken: access_token,
     refreshToken: refresh_token,
     expiresAt,
   });
-  logger.info("Tokens saved successfully");
+  logger.info({ userId }, "Tokens saved successfully");
 }
 
-export async function refreshAccessToken(): Promise<string> {
-  const tokens = loadTokens();
-  if (!tokens?.refreshToken) throw new ZohoAuthError("No refresh token found. Visit /auth/login to authenticate.");
+export async function refreshAccessToken(userId: string): Promise<string> {
+  const tokens = loadTokens(userId);
+  if (!tokens?.refreshToken) throw new ZohoAuthError(`No refresh token found for user ${userId}. Visit /auth/login?uid=${userId} to authenticate.`);
   const res = await axios.post<{ access_token: string; expires_in: number }>(
     `${authBase()}/oauth/v2/token`,
     null,
@@ -64,8 +65,7 @@ export async function refreshAccessToken(): Promise<string> {
   );
   const { access_token, expires_in } = res.data;
   const expiresAt = Date.now() + ((expires_in && expires_in > 0) ? expires_in : 3600) * 1000;
-  saveTokens({ ...tokens, accessToken: access_token, expiresAt });
-  logger.info("Access token refreshed");
+  saveTokens(userId, { ...tokens, accessToken: access_token, expiresAt });
+  logger.info({ userId }, "Access token refreshed");
   return access_token;
 }
-
