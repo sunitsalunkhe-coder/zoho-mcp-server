@@ -1,4 +1,7 @@
 import crypto from "crypto";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import axios from "axios";
 import type { Response } from "express";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
@@ -6,9 +9,55 @@ import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/serv
 import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { saveTokens } from "./token-store.js";
+import { encrypt, decrypt } from "../utils/encryption.js";
 import { logger } from "../utils/logger.js";
 
-// In-memory stores (acceptable for Render free tier testing)
+// ─── Persistence ──────────────────────────────────────────────────────────────
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = join(__dirname, "..", "..", "data");
+const SESSIONS_FILE = join(DATA_DIR, "mcp-sessions.enc");
+
+interface PersistedSessions {
+  clients: Array<[string, OAuthClientInformationFull]>;
+  accessTokens: Array<[string, AuthInfo]>;
+  refreshTokens: Array<[string, { userId: string; clientId: string; scopes: string[] }]>;
+}
+
+function saveSessions(): void {
+  try {
+    if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+    const data: PersistedSessions = {
+      clients: Array.from(clients.entries()),
+      accessTokens: Array.from(accessTokens.entries()),
+      refreshTokens: Array.from(refreshTokens.entries()),
+    };
+    writeFileSync(SESSIONS_FILE, encrypt(JSON.stringify(data)), "utf8");
+  } catch (e) {
+    logger.error({ err: e }, "mcp_sessions_save_failed");
+  }
+}
+
+function loadSessions(): void {
+  try {
+    if (!existsSync(SESSIONS_FILE)) return;
+    const raw = decrypt(readFileSync(SESSIONS_FILE, "utf8"));
+    const data: PersistedSessions = JSON.parse(raw);
+    const now = Math.floor(Date.now() / 1000);
+    let loaded = 0;
+    for (const [k, v] of data.clients ?? []) clients.set(k, v);
+    for (const [k, v] of data.accessTokens ?? []) {
+      if (!v.expiresAt || v.expiresAt > now) { accessTokens.set(k, v); loaded++; }
+    }
+    for (const [k, v] of data.refreshTokens ?? []) refreshTokens.set(k, v);
+    logger.info({ loaded, clients: clients.size }, "mcp_sessions_loaded");
+  } catch (e) {
+    logger.error({ err: e }, "mcp_sessions_load_failed");
+  }
+}
+
+// ─── In-memory stores ─────────────────────────────────────────────────────────
+
 const clients = new Map<string, OAuthClientInformationFull>();
 
 // pending: stateId → { codeChallenge, redirectUri, clientId, mcpState }
@@ -34,6 +83,11 @@ const accessTokens = new Map<string, AuthInfo>();
 // refreshTokens: token → { userId, clientId, scopes }
 const refreshTokens = new Map<string, { userId: string; clientId: string; scopes: string[] }>();
 
+// Load persisted sessions on startup
+loadSessions();
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
 function authBase(): string {
   return `https://accounts.zoho.${process.env["ZOHO_DC"] ?? "in"}`;
 }
@@ -54,6 +108,8 @@ export function getZohoAuthUrl(stateId: string): string {
   });
   return `${authBase()}/oauth/v2/auth?${params.toString()}`;
 }
+
+// ─── Zoho callback ────────────────────────────────────────────────────────────
 
 // Called from /oauth/callback when Zoho redirects back
 export async function handleZohoCallback(zohoCode: string, stateId: string): Promise<void> {
@@ -76,7 +132,6 @@ export async function handleZohoCallback(zohoCode: string, stateId: string): Pro
     },
   });
 
-  logger.info({ zohoTokenResponse: tokenRes.data }, "zoho_token_exchange_response");
   const { access_token, refresh_token, expires_in } = tokenRes.data;
   if (!access_token) throw new Error(`No access_token from Zoho. Response: ${JSON.stringify(tokenRes.data)}`);
 
@@ -116,6 +171,8 @@ export async function handleZohoCallback(zohoCode: string, stateId: string): Pro
 // Store pending redirects for /oauth/callback handler to use
 export const pendingCallbacks = new Map<string, { redirectUri: string; code: string; state?: string }>();
 
+// ─── OAuth Provider ───────────────────────────────────────────────────────────
+
 export function createOAuthProvider(): OAuthServerProvider {
   const clientsStore: OAuthRegisteredClientsStore = {
     getClient(clientId: string) {
@@ -129,6 +186,7 @@ export function createOAuthProvider(): OAuthServerProvider {
         client_id_issued_at: Math.floor(Date.now() / 1000),
       };
       clients.set(clientId, full);
+      saveSessions();
       logger.info({ clientId }, "oauth_client_registered");
       return full;
     },
@@ -184,6 +242,7 @@ export function createOAuthProvider(): OAuthServerProvider {
         scopes: ["zohomail"],
       });
 
+      saveSessions();
       logger.info({ userId: entry.userId }, "oauth_tokens_issued");
 
       return {
@@ -211,12 +270,16 @@ export function createOAuthProvider(): OAuthServerProvider {
         extra: { userId: entry.userId },
       });
 
+      accessTokens.delete(token); // remove old access token if same key (not applicable but safe)
       refreshTokens.delete(token);
       refreshTokens.set(newRefreshToken, {
         userId: entry.userId,
         clientId: entry.clientId,
         scopes: entry.scopes,
       });
+
+      saveSessions();
+      logger.info({ userId: entry.userId }, "oauth_tokens_refreshed");
 
       return {
         access_token: accessToken,
@@ -236,6 +299,7 @@ export function createOAuthProvider(): OAuthServerProvider {
     async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest) {
       accessTokens.delete(request.token);
       refreshTokens.delete(request.token);
+      saveSessions();
     },
   };
 }
