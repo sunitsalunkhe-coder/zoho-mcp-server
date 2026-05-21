@@ -168,7 +168,7 @@ export function createOAuthProvider(): OAuthServerProvider {
 
       const accessToken = crypto.randomUUID();
       const refreshToken = crypto.randomUUID();
-      const expiresIn = 3600;
+      const expiresIn = 30 * 24 * 60 * 60; // 30 days
 
       accessTokens.set(accessToken, {
         token: accessToken,
@@ -201,7 +201,7 @@ export function createOAuthProvider(): OAuthServerProvider {
 
       const accessToken = crypto.randomUUID();
       const newRefreshToken = crypto.randomUUID();
-      const expiresIn = 3600;
+      const expiresIn = 30 * 24 * 60 * 60; // 30 days
 
       accessTokens.set(accessToken, {
         token: accessToken,
