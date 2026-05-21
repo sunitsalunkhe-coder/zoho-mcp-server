@@ -77,7 +77,7 @@ export async function handleZohoCallback(zohoCode: string, stateId: string): Pro
   });
 
   const { access_token, refresh_token, expires_in } = tokenRes.data;
-  if (!refresh_token) throw new Error("No refresh_token from Zoho — ensure access_type=offline");
+  if (!access_token) throw new Error("No access_token returned from Zoho");
 
   // Get user email from Zoho
   const accountRes = await axios.get<{ data: Array<{ accountId: string; incomingUserName: string; emailAddress: Array<{ mailId: string; isPrimary: boolean }> }> }>(
@@ -91,7 +91,7 @@ export async function handleZohoCallback(zohoCode: string, stateId: string): Pro
   const expiresAt = Date.now() + ((expires_in && expires_in > 0) ? expires_in : 3600) * 1000;
 
   // Save Zoho tokens for this user
-  saveTokens(userId, { accessToken: access_token, refreshToken: refresh_token, expiresAt, accountId: acc.accountId });
+  saveTokens(userId, { accessToken: access_token, refreshToken: refresh_token ?? "", expiresAt, accountId: acc.accountId });
   logger.info({ userId }, "zoho_tokens_saved");
 
   // Create our auth code
