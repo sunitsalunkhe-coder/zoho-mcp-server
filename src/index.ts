@@ -8,10 +8,13 @@ import {
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { logger } from "./utils/logger.js";
 import { toUserMessage } from "./utils/errors.js";
 import { userContext } from "./utils/context.js";
 import { createOAuthApp } from "./server/oauth-callback.js";
+import { createOAuthProvider } from "./auth/oauth-provider.js";
 
 import * as sendTool from "./tools/send.js";
 import * as draftTool from "./tools/draft.js";
@@ -94,65 +97,84 @@ async function main(): Promise<void> {
   } else {
     logger.info({ port }, "Starting MCP server (Streamable HTTP transport)");
     const app = createOAuthApp();
+    const oauthProvider = createOAuthProvider();
+    const serverUrl = new URL(process.env["SERVER_URL"] ?? `http://localhost:${port}`);
+
+    // Mount MCP auth router — handles /authorize, /token, /register, /.well-known/*
+    app.use(mcpAuthRouter({
+      provider: oauthProvider,
+      issuerUrl: serverUrl,
+      baseUrl: serverUrl,
+      serviceDocumentationUrl: new URL("https://github.com/sunitsalunkhe-coder/zoho-mcp-server"),
+    }));
 
     // session → { server, transport }
     const sessions = new Map<string, { server: Server; transport: StreamableHTTPServerTransport }>();
 
-    app.post("/mcp", async (req, res) => {
-      const userId = (req.query["uid"] as string) || "default";
-      const existingSessionId = req.headers["mcp-session-id"] as string | undefined;
+    app.post("/mcp",
+      requireBearerAuth({ verifier: oauthProvider }),
+      async (req, res) => {
+        const userId = (req.auth?.extra?.userId as string) ?? "default";
+        const existingSessionId = req.headers["mcp-session-id"] as string | undefined;
 
-      if (existingSessionId && sessions.has(existingSessionId)) {
-        const { transport } = sessions.get(existingSessionId)!;
-        await transport.handleRequest(req, res, req.body);
-        return;
+        if (existingSessionId && sessions.has(existingSessionId)) {
+          const { transport } = sessions.get(existingSessionId)!;
+          await transport.handleRequest(req, res, req.body);
+          return;
+        }
+
+        // New session
+        const server = await createMcpServer(userId);
+        const t = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => crypto.randomUUID(),
+        });
+
+        await server.connect(t);
+        await t.handleRequest(req, res, req.body);
+
+        if (t.sessionId) {
+          sessions.set(t.sessionId, { server, transport: t });
+          t.onclose = () => {
+            if (t.sessionId) sessions.delete(t.sessionId);
+            logger.info({ userId, sessionId: t.sessionId }, "session closed");
+          };
+          logger.info({ userId, sessionId: t.sessionId }, "session created");
+        }
       }
+    );
 
-      // New session
-      const server = await createMcpServer(userId);
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => crypto.randomUUID(),
-      });
-
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-
-      if (transport.sessionId) {
-        sessions.set(transport.sessionId, { server, transport });
-        transport.onclose = () => {
-          if (transport.sessionId) sessions.delete(transport.sessionId);
-          logger.info({ userId, sessionId: transport.sessionId }, "session closed");
-        };
-        logger.info({ userId, sessionId: transport.sessionId }, "session created");
+    app.get("/mcp",
+      requireBearerAuth({ verifier: oauthProvider }),
+      async (req, res) => {
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+        if (!sessionId || !sessions.has(sessionId)) {
+          res.status(400).json({ error: "Invalid or missing session ID" });
+          return;
+        }
+        const { transport } = sessions.get(sessionId)!;
+        await transport.handleRequest(req, res);
       }
-    });
+    );
 
-    app.get("/mcp", async (req, res) => {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (!sessionId || !sessions.has(sessionId)) {
-        res.status(400).json({ error: "Invalid or missing session ID" });
-        return;
+    app.delete("/mcp",
+      requireBearerAuth({ verifier: oauthProvider }),
+      async (req, res) => {
+        const sessionId = req.headers["mcp-session-id"] as string | undefined;
+        if (sessionId && sessions.has(sessionId)) {
+          const { server, transport } = sessions.get(sessionId)!;
+          await transport.close();
+          await server.close();
+          sessions.delete(sessionId);
+        }
+        res.status(200).json({ ok: true });
       }
-      const { transport } = sessions.get(sessionId)!;
-      await transport.handleRequest(req, res);
-    });
-
-    app.delete("/mcp", async (req, res) => {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-      if (sessionId && sessions.has(sessionId)) {
-        const { server, transport } = sessions.get(sessionId)!;
-        await transport.close();
-        await server.close();
-        sessions.delete(sessionId);
-      }
-      res.status(200).json({ ok: true });
-    });
+    );
 
     app.listen(port, () => {
       logger.info({ port }, "HTTP server listening");
-      logger.info(`MCP endpoint: http://localhost:${port}/mcp?uid=email@domain.com`);
-      logger.info(`Auth: http://localhost:${port}/auth/login?uid=email@domain.com`);
-      logger.info(`Health: http://localhost:${port}/health`);
+      logger.info(`MCP endpoint: ${serverUrl.href}mcp`);
+      logger.info(`OAuth metadata: ${serverUrl.href}.well-known/oauth-authorization-server`);
+      logger.info(`Health: ${serverUrl.href}health`);
     });
   }
 }
