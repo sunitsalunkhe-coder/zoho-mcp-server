@@ -76,8 +76,9 @@ export async function handleZohoCallback(zohoCode: string, stateId: string): Pro
     },
   });
 
+  logger.info({ zohoTokenResponse: tokenRes.data }, "zoho_token_exchange_response");
   const { access_token, refresh_token, expires_in } = tokenRes.data;
-  if (!access_token) throw new Error("No access_token returned from Zoho");
+  if (!access_token) throw new Error(`No access_token from Zoho. Response: ${JSON.stringify(tokenRes.data)}`);
 
   // Get user email from Zoho
   const accountRes = await axios.get<{ data: Array<{ accountId: string; incomingUserName: string; emailAddress: Array<{ mailId: string; isPrimary: boolean }> }> }>(
