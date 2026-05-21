@@ -5,6 +5,7 @@ import { logger } from "../utils/logger.js";
 
 export function createOAuthApp(): express.Application {
   const app = express();
+  app.set("trust proxy", 1); // trust Nginx reverse proxy
   app.use(express.json());
 
   // CORS for claude.ai web
