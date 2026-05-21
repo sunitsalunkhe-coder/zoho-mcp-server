@@ -13,14 +13,17 @@ import { logger } from "../utils/logger.js";
 
 // ─── Folders ──────────────────────────────────────────────────────────────────
 
-let folderCache: ZohoFolder[] | null = null;
+import { getUserId } from "../utils/context.js";
+
+const folderCache = new Map<string, ZohoFolder[]>();
 
 export async function getFolders(): Promise<ZohoFolder[]> {
-  if (folderCache) return folderCache;
+  const uid = getUserId();
+  if (folderCache.has(uid)) return folderCache.get(uid)!;
   const [zaid, client] = [await getAccountId(), getZohoClient()];
   const res = await client.get<ZohoApiResponse<ZohoFolder[]>>(`/accounts/${zaid}/folders`);
-  folderCache = res.data.data;
-  return folderCache;
+  folderCache.set(uid, res.data.data);
+  return res.data.data;
 }
 
 export async function getFolderIdByName(name: string): Promise<string | null> {
@@ -219,14 +222,14 @@ export async function markRead(messageIds: string[], read: boolean): Promise<voi
 
 export async function getOrCreateLabel(labelName: string): Promise<string> {
   // Check folder cache first — avoid extra API call
-  const cached = folderCache?.find(
-    (f) => f.folderName.toLowerCase() === labelName.toLowerCase(),
+  const cached = folderCache.get(getUserId())?.find(
+    (f: ZohoFolder) => f.folderName.toLowerCase() === labelName.toLowerCase(),
   );
   if (cached) return cached.folderId;
 
   const [zaid, client] = [await getAccountId(), getZohoClient()];
   const res = await client.get<ZohoApiResponse<ZohoLabel[]>>(`/accounts/${zaid}/folders`);
-  folderCache = res.data.data as unknown as ZohoFolder[];
+  folderCache.set(getUserId(), res.data.data as unknown as ZohoFolder[]);
   const existing = res.data.data.find(
     (f) => f.folderName.toLowerCase() === labelName.toLowerCase(),
   );
@@ -237,7 +240,7 @@ export async function getOrCreateLabel(labelName: string): Promise<string> {
     parentFolderId: "5",
     type: "label",
   });
-  folderCache = null;
+  folderCache.delete(getUserId());
   return create.data.data.folderId;
 }
 
