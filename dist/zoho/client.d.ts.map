@@ -1,0 +1,1 @@
+{"version":3,"file":"client.d.ts","sourceRoot":"","sources":["../../src/zoho/client.ts"],"names":[],"mappings":"AAAA,OAAc,EAAE,KAAK,aAAa,EAAmB,MAAM,OAAO,CAAC;AASnE,eAAO,MAAM,SAAS,QAA4D,CAAC;AAMnF,wBAAgB,aAAa,IAAI,aAAa,CA0C7C;AAED,wBAAsB,YAAY,IAAI,OAAO,CAAC,MAAM,CAAC,CA6BpD;AAED,wBAAsB,YAAY,IAAI,OAAO,CAAC,MAAM,CAAC,CAsBpD"}

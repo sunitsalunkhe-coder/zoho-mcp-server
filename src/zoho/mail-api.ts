@@ -54,20 +54,50 @@ export interface ListMessagesOptions {
   fromDate?: string;
 }
 
+const ZOHO_PAGE_SIZE = 50; // Zoho API safe page size
+
 export async function listMessages(opts: ListMessagesOptions = {}): Promise<ZohoMessageSummary[]> {
   const [zaid, client] = [await getAccountId(), getZohoClient()];
-  const params: Record<string, string | number> = {
-    limit: opts.limit ?? 20,
-    start: opts.start ?? 0,
-  };
-  if (opts.folderId) params["folderId"] = opts.folderId;
-  if (opts.unreadOnly) params["status"] = "unread";
-  if (opts.fromDate) params["fromDate"] = opts.fromDate;
-  const res = await client.get<ZohoApiResponse<ZohoMessageSummary[]>>(
-    `/accounts/${zaid}/messages/view`,
-    { params },
-  );
-  return res.data.data ?? [];
+  const totalWanted = opts.limit ?? 20;
+
+  // Single page — no pagination needed
+  if (totalWanted <= ZOHO_PAGE_SIZE) {
+    const params: Record<string, string | number> = {
+      limit: totalWanted,
+      start: opts.start ?? 0,
+    };
+    if (opts.folderId) params["folderId"] = opts.folderId;
+    if (opts.unreadOnly) params["status"] = "unread";
+    if (opts.fromDate) params["fromDate"] = opts.fromDate;
+    const res = await client.get<ZohoApiResponse<ZohoMessageSummary[]>>(
+      `/accounts/${zaid}/messages/view`,
+      { params },
+    );
+    return res.data.data ?? [];
+  }
+
+  // Paginate: fetch ZOHO_PAGE_SIZE at a time until we have enough
+  const results: ZohoMessageSummary[] = [];
+  let start = opts.start ?? 0;
+  while (results.length < totalWanted) {
+    const fetchSize = Math.min(ZOHO_PAGE_SIZE, totalWanted - results.length);
+    const params: Record<string, string | number> = {
+      limit: fetchSize,
+      start,
+    };
+    if (opts.folderId) params["folderId"] = opts.folderId;
+    if (opts.unreadOnly) params["status"] = "unread";
+    if (opts.fromDate) params["fromDate"] = opts.fromDate;
+    const res = await client.get<ZohoApiResponse<ZohoMessageSummary[]>>(
+      `/accounts/${zaid}/messages/view`,
+      { params },
+    );
+    const page = res.data.data ?? [];
+    results.push(...page);
+    if (page.length < fetchSize) break; // no more messages
+    start += fetchSize;
+  }
+  return results;
 }
 
 export interface SearchOptions {
