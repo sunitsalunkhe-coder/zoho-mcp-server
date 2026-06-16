@@ -57,6 +57,18 @@ export interface ZohoLabel {
   type?: string;
 }
 
+export interface ZohoAttachmentInput {
+  filename: string;
+  content_base64: string;
+  mime_type: string;
+}
+
+export interface ZohoUploadedAttachment {
+  storeName: string;
+  attachmentPath: string;
+  attachmentName: string;
+}
+
 export interface ZohoSendPayload {
   fromAddress: string;
   toAddress: string;
@@ -67,5 +79,6 @@ export interface ZohoSendPayload {
   mailFormat: "html" | "plaintext";
   encoding?: string;
   inReplyTo?: string;
-  isDraft?: string;
+  mode?: string;
+  attachments?: ZohoAttachmentInput[];
 }

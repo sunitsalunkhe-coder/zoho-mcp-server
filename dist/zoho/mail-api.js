@@ -21,12 +21,45 @@ export async function getFolderIdByName(name) {
 // ─── Send / Draft ─────────────────────────────────────────────────────────────
 export async function sendEmail(payload) {
     const [zaid, client] = [await getAccountId(), getZohoClient()];
-    const res = await client.post(`/accounts/${zaid}/messages`, payload);
+    // Step 1: upload attachments to Zoho file store, get refs for send payload
+    let uploaded;
+    if (payload.attachments?.length) {
+        const form = new FormData();
+        for (const att of payload.attachments) {
+            const buf = Buffer.from(att.content_base64, "base64");
+            const blob = new Blob([buf], { type: att.mime_type });
+            form.append("attach", blob, att.filename);
+        }
+        const uploadRes = await client.post(`/accounts/${zaid}/messages/attachments`, form, { params: { uploadType: "multipart" } });
+        uploaded = uploadRes.data.data;
+        logger.info({ count: uploaded.length }, "attachments_uploaded");
+    }
+    // Step 2: send/save with uploaded attachment refs in JSON body
+    const body = {
+        fromAddress: payload.fromAddress,
+        toAddress: payload.toAddress,
+        subject: payload.subject,
+        content: payload.content,
+        mailFormat: payload.mailFormat,
+    };
+    if (payload.ccAddress)
+        body["ccAddress"] = payload.ccAddress;
+    if (payload.bccAddress)
+        body["bccAddress"] = payload.bccAddress;
+    if (payload.encoding)
+        body["encoding"] = payload.encoding;
+    if (payload.inReplyTo)
+        body["inReplyTo"] = payload.inReplyTo;
+    if (payload.mode)
+        body["mode"] = payload.mode;
+    if (uploaded?.length)
+        body["attachments"] = uploaded;
+    const res = await client.post(`/accounts/${zaid}/messages`, body);
     logger.info({ status: res.data.status.code }, "email_sent");
     return res.data.data.messageId;
 }
 export async function createDraft(payload) {
-    return sendEmail({ ...payload, isDraft: "true" });
+    return sendEmail({ ...payload, mode: "draft" });
 }
 const ZOHO_PAGE_SIZE = 50; // Zoho API safe page size
 export async function listMessages(opts = {}) {
@@ -149,10 +182,8 @@ export async function getThread(threadId) {
     return messages.sort((a, b) => parseInt(a.sentDateInGMT) - parseInt(b.sentDateInGMT));
 }
 // ─── Reply ────────────────────────────────────────────────────────────────────
-export async function replyToMessage(messageId, bodyHtml, replyAll, folderId) {
-    const [zaid, client, original, fromAddress] = await Promise.all([
-        getAccountId(),
-        Promise.resolve(getZohoClient()),
+export async function replyToMessage(messageId, bodyHtml, replyAll, folderId, attachments) {
+    const [original, fromAddress] = await Promise.all([
         getMessage(messageId, folderId),
         getFromEmail(),
     ]);
@@ -161,7 +192,7 @@ export async function replyToMessage(messageId, bodyHtml, replyAll, folderId) {
         const all = [original.toAddress, original.ccAddress].filter(Boolean).join(",");
         ccAddress = all || undefined;
     }
-    const payload = {
+    return sendEmail({
         fromAddress,
         toAddress: original.fromAddress,
         ccAddress,
@@ -169,9 +200,8 @@ export async function replyToMessage(messageId, bodyHtml, replyAll, folderId) {
         content: bodyHtml,
         mailFormat: "html",
         inReplyTo: messageId,
-    };
-    const res = await client.post(`/accounts/${zaid}/messages`, payload);
-    return res.data.data.messageId;
+        attachments,
+    });
 }
 // ─── Mark Read ────────────────────────────────────────────────────────────────
 export async function markRead(messageIds, read) {

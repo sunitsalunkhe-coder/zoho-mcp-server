@@ -17,10 +17,28 @@ export const definition = {
             subject: { type: "string" },
             body_html: { type: "string" },
             body_text: { type: "string" },
+            attachments: {
+                type: "array",
+                description: "File attachments (base64-encoded)",
+                items: {
+                    type: "object",
+                    properties: {
+                        filename: { type: "string", description: "File name with extension" },
+                        content_base64: { type: "string", description: "Base64-encoded file content" },
+                        mime_type: { type: "string", description: "MIME type e.g. application/pdf" },
+                    },
+                    required: ["filename", "content_base64", "mime_type"],
+                },
+            },
         },
         required: ["to", "subject", "body_html"],
     },
 };
+const AttachmentSchema = z.object({
+    filename: z.string().min(1),
+    content_base64: z.string().min(1),
+    mime_type: z.string().min(1),
+});
 const Schema = z.object({
     to: z.array(z.string().email()),
     cc: z.array(z.string().email()).optional(),
@@ -28,6 +46,7 @@ const Schema = z.object({
     subject: z.string().min(1).max(1000),
     body_html: z.string().min(1),
     body_text: z.string().optional(),
+    attachments: z.array(AttachmentSchema).optional(),
 });
 export async function handler(args) {
     const params = Schema.parse(args);
@@ -45,7 +64,7 @@ export async function handler(args) {
             subject: params.subject,
             content: sanitized,
             mailFormat: "html",
-            isDraft: "true",
+            attachments: params.attachments,
         });
         return JSON.stringify({ success: true, draftId });
     }
