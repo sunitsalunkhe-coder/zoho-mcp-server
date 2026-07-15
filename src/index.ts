@@ -1,5 +1,5 @@
-import "dotenv/config";
 import crypto from "crypto";
+import { loadConfig } from "./utils/config.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -85,6 +85,7 @@ async function createMcpServer(userId: string): Promise<Server> {
 }
 
 async function main(): Promise<void> {
+  await loadConfig();
   const transport = process.env["MCP_TRANSPORT"] ?? "stdio";
   const port = parseInt(process.env["PORT"] ?? "3000");
 
